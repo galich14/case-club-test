@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import {randomBytes} from 'node:crypto';
+import {request} from 'node:http';
+import {once} from 'node:events';
+import {WebSocket} from 'ws';
+import {createGateway} from './server.mjs';
+const token=randomBytes(32).toString('base64url'), origin='https://trainer.example';
+const app=createGateway({token,origin,assets:{'/':{type:'text/html',body:Buffer.from('trainer').toString('base64')}},timeoutMs:150});
+app.server.listen(0,'127.0.0.1');await once(app.server,'listening');
+const port=app.server.address().port;
+const http=(path,headers={},method='GET',body)=>new Promise((resolve,reject)=>{const req=request({host:'127.0.0.1',port,path,method,headers:{host:'trainer.example',...headers}},res=>{let data='';res.on('data',d=>data+=d);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,body:data}));});req.on('error',reject);req.end(body);});
+const peers=[];
+const connect=async(credential=token,extra={})=>{const peer=new WebSocket(`ws://127.0.0.1:${port}/_bridge`,{headers:{host:'trainer.example',authorization:'Bearer '+credential,...extra}});peers.push(peer);await once(peer,'open');return peer;};
+try{
+ assert.equal((await http('/')).body,'trainer');
+ assert.equal((await http('/.dev.vars')).status,404);
+ assert.equal((await http('/connect-ai')).status,404);
+ assert.equal((await http('/api/status')).status,503);
+ assert.equal((await http('/api/status',{origin:'https://evil.example'})).status,403);
+ assert.equal((await http('/api/evaluate',{},'POST','{}')).status,403);
+ assert.equal((await http('/',{host:'evil.example'})).status,400);
+ await assert.rejects(connect(randomBytes(32).toString('base64url')));
+ await assert.rejects(connect(token,{origin}));
+ const peer=await connect();const assigned=once(peer,'message');peer.send(JSON.stringify({type:'initialise'}));
+ assert.equal(JSON.parse((await assigned)[0]).hostname,'trainer.example');
+ const incoming=once(peer,'message'),pending=http('/api/session',{cookie:'isolated-profile'});
+ const msg=JSON.parse((await incoming)[0]);assert.equal(msg.headers.cookie,'isolated-profile');assert.equal(msg.headers.host,'trainer.example');
+ peer.send(JSON.stringify({type:'forwardedResponse',requestId:msg.requestId,statusCode:200,headers:{'content-type':'application/json','set-cookie':['p=a; Secure; HttpOnly; SameSite=Strict'],'location':'https://evil.example'},body:Buffer.from('{"ok":true}').toString('base64')}));
+ const result=await pending;assert.equal(result.body,'{"ok":true}');assert.deepEqual(result.headers['set-cookie'],['p=a; Secure; HttpOnly; SameSite=Strict']);assert.equal(result.headers.location,undefined);assert.equal(result.headers['x-frame-options'],'DENY');
+ const malformed=once(peer,'message'),bad=http('/api/status');const badId=JSON.parse((await malformed)[0]).requestId;
+ peer.send(JSON.stringify({type:'forwardedResponse',requestId:badId,statusCode:999,headers:{},body:''}));assert.equal((await bad).status,502);
+ const wait=once(peer,'message'),waiting=http('/api/status');await wait;assert.equal((await waiting).status,504);
+ const second=await connect();assert.equal(JSON.parse((await http('/health')).body).backend,true);second.close();await once(second,'close');
+ assert.equal((await http('/api/progress')).status,503);
+ assert.equal((await http('/')).status,200);
+ console.log('Gateway verification passed: origin/auth isolation, restricted routes, exact forwarding, secure cookies, malformed responses, timeout and disconnect recovery.');
+}finally{for(const peer of peers)peer.terminate();await app.close();}

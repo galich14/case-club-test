@@ -1,0 +1,16 @@
+{
+  "name": "case-club-test-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node check-gateway.mjs"
+  },
+  "dependencies": {
+    "ws": "8.21.0"
+  }
+}
